@@ -14,15 +14,15 @@ on:
       DEVICE_TREE_URL:
         description: 'DEVICE_TREE_URL'
         required: true
-        default: 'https://github.com/TeamWin/android_device_asus_I003D'
+        default: 'https://github.com/qingzhenzi/android_device_xiaomi_camellia'
       DEVICE_TREE_BRANCH:
         description: 'DEVICE_TREE_BRANCH'
         required: true
-        default: 'android-12.1'
+        default: 'main'
       DEVICE_PATH:
         description: 'DEVICE_PATH'
         required: true
-        default: 'device/asus/I003D'
+        default: 'device/xiaomi/camellia'
       COMMON_TREE_URL:
         description: 'COMMON_TREE_URL (if no common tree, leave blank)'
         required: false
@@ -32,11 +32,11 @@ on:
       DEVICE_NAME:
         description: 'DEVICE_NAME'
         required: true
-        default: 'I003D'
+        default: 'camellia'
       MAKEFILE_NAME:
         description: 'MAKEFILE_NAME'
         required: true
-        default: 'twrp_I003D'
+        default: 'omni_camellia'
       BUILD_TARGET:
         description: 'BUILD_TARGET'
         required: true
@@ -159,18 +159,52 @@ jobs:
         lunch ${{ github.event.inputs.MAKEFILE_NAME }}-eng && mka ${{ github.event.inputs.BUILD_TARGET }}image
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
+    - name: Set Build Props
+      id: build_props
+      run: |
+        # 自动查找生成的 img 文件，不管它藏在哪个子文件夹里
+        # 排除中间产物，只找 output 目录下的最终文件
+        echo "Finding build artifacts..."
+        find workspace/out/target/product -maxdepth 3 -name "*.img"
+        
+        # 尝试找到 recovery.img, boot.img 或 vendor_boot.img
+        IMG_FILE=$(find workspace/out/target/product -name "${{ github.event.inputs.BUILD_TARGET }}.img" -type f | head -n 1)
+        
+        if [ -z "$IMG_FILE" ]; then
+          # 如果没找到指定的目标，尝试找通用的 recovery.img
+          IMG_FILE=$(find workspace/out/target/product -name "recovery.img" -type f | head -n 1)
+        fi
+        
+        if [ -z "$IMG_FILE" ]; then
+           # 如果还没找到，尝试找 boot.img (针对 A/B 设备)
+           IMG_FILE=$(find workspace/out/target/product -name "boot.img" -type f | head -n 1)
+        fi
+
+        if [ -n "$IMG_FILE" ]; then
+          echo "Found image file at: $IMG_FILE"
+          echo "image_file=$IMG_FILE" >> $GITHUB_OUTPUT
+          echo "is_success=true" >> $GITHUB_OUTPUT
+        else
+          echo "::error::No image file found! Build might have failed or target name is wrong."
+          echo "is_success=false" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+      continue-on-error: true
+
     - name: Upload to Release
+      if: steps.build_props.outputs.is_success == 'true'
       uses: softprops/action-gh-release@v2
       with:
         files: | 
-          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/${{ github.event.inputs.BUILD_TARGET }}.img
-          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/*.zip
-          workspace/out/target/product/${{ github.event.inputs.DEVICE_NAME }}/*vendor*.img
+          ${{ steps.build_props.outputs.image_file }}
+          workspace/out/target/product/*/*.zip
+          workspace/out/target/product/*/*vendor*.img
         name: ${{ github.event.inputs.DEVICE_NAME }}-${{ github.run_id }}
         tag_name: ${{ github.run_id }}
         body: |
           Manifest: ${{ github.event.inputs.MANIFEST_BRANCH }}
           Device: ${{ github.event.inputs.DEVICE_NAME }}
           Target: ${{ github.event.inputs.BUILD_TARGET }}.img
+          File Found: ${{ steps.build_props.outputs.image_file }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

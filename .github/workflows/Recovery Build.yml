@@ -1,10 +1,10 @@
-name: Recovery Build
+name: Recovery Build Debug
 
 on:
   workflow_dispatch:
     inputs:
       MANIFEST_URL:
-        description: 'MANIFEST_URL (if want to use SSH keys, use git@github.com:XXXXX)'
+        description: 'MANIFEST_URL'
         required: true
         default: 'https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp'
       MANIFEST_BRANCH:
@@ -23,22 +23,16 @@ on:
         description: 'DEVICE_PATH'
         required: true
         default: 'device/xiaomi/camellia'
-      COMMON_TREE_URL:
-        description: 'COMMON_TREE_URL (if no common tree, leave blank)'
-        required: false
-      COMMON_PATH:
-        description: 'COMMON_PATH (if no common tree, leave blank)'
-        required: false
       DEVICE_NAME:
-        description: 'DEVICE_NAME'
+        description: 'DEVICE_NAME (Must match folder name)'
         required: true
         default: 'camellia'
       MAKEFILE_NAME:
-        description: 'MAKEFILE_NAME'
+        description: 'MAKEFILE_NAME (Check AndroidProducts.mk)'
         required: true
         default: 'omni_camellia'
       BUILD_TARGET:
-        description: 'BUILD_TARGET'
+        description: 'BUILD_TARGET (Ignored, we build all)'
         required: true
         default: 'recovery'
 
@@ -49,19 +43,6 @@ jobs:
     permissions:
       contents: write
     steps:
-    - name: Display Run Parameters
-      run: |
-        echo "::group::User Environment Variables"
-        echo "Manifest URL: ${{ github.event.inputs.MANIFEST_URL }}"
-        echo "Manifest Branch: ${{ github.event.inputs.MANIFEST_BRANCH }}"
-        echo "Device Tree URL: ${{ github.event.inputs.DEVICE_TREE_URL }}"
-        echo "Device Tree Branch: ${{ github.event.inputs.DEVICE_TREE_BRANCH }}"
-        echo "Device Path: ${{ github.event.inputs.DEVICE_PATH }}"
-        echo "Device Name: ${{ github.event.inputs.DEVICE_NAME }}"
-        echo "Makefile Name: ${{ github.event.inputs.MAKEFILE_NAME }}"
-        echo "Build Target: ${{ github.event.inputs.BUILD_TARGET }}.img"
-        echo "::endgroup::"
-
     - name: Check Out
       uses: actions/checkout@v4
 
@@ -85,15 +66,6 @@ jobs:
         distribution: 'zulu'
         java-version: '11'
 
-    - name: Setup SSH Keys
-      if: ${{ startsWith(github.event.inputs.MANIFEST_URL, 'git@github.com') || 
-          startsWith(github.event.inputs.DEVICE_TREE_URL, 'git@github.com') ||
-          startsWith(github.event.inputs.COMMON_TREE_URL, 'git@github.com') }}
-      uses: webfactory/ssh-agent@v0.9.0
-      with:
-          ssh-private-key: |
-            ${{ secrets.SSH_PRIVATE_KEY }}
-
     - name: Install repo
       run: |
         mkdir ~/bin
@@ -106,8 +78,8 @@ jobs:
         mkdir workspace
         cd workspace
         echo "workspace-folder=$(pwd)" >> $GITHUB_OUTPUT
-        git config --global user.name "Nico170420"
-        git config --global user.email "b170420nc@gmail.com"
+        git config --global user.name "Action-Build"
+        git config --global user.email "action@github.com"
         repo init --depth=1 -u ${{ github.event.inputs.MANIFEST_URL }} -b ${{ github.event.inputs.MANIFEST_BRANCH }}
       id: pwd
 
@@ -121,47 +93,36 @@ jobs:
         git clone ${{ github.event.inputs.DEVICE_TREE_URL }} -b ${{ github.event.inputs.DEVICE_TREE_BRANCH }} ./${{ github.event.inputs.DEVICE_PATH }}
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
-    - name: Clone common tree
-      if: |
-        github.event.inputs.COMMON_TREE_URL != null
-        && github.event.inputs.COMMON_PATH != null
+    - name: Check Device Tree Info
       run: |
-        git clone ${{ github.event.inputs.COMMON_TREE_URL }} -b ${{ github.event.inputs.DEVICE_TREE_BRANCH }} ./${{ github.event.inputs.COMMON_PATH }}
-      working-directory: ${{ steps.pwd.outputs.workspace-folder }}
-
-    - name: Check Build Tree
-      uses: haya14busa/action-cond@v1
-      id: buildtree
-      with:
-        cond: ${{ github.event.inputs.MANIFEST_BRANCH == 'twrp-11' || github.event.inputs.MANIFEST_BRANCH == 'twrp-12.1' }}
-        if_true: twrp
-        if_false: omni
-
-    - name: Sync Device Dependencies
-      run: |
-        bash ${GITHUB_WORKSPACE}/scripts/convert.sh ${{ github.event.inputs.DEVICE_PATH }}/${{ steps.buildtree.outputs.value }}.dependencies
-        repo sync -j$(nproc --all)
+        echo "------ AndroidProducts.mk ------"
+        cat ${{ github.event.inputs.DEVICE_PATH }}/AndroidProducts.mk || echo "File not found"
+        echo "------ BoardConfig.mk ------"
+        cat ${{ github.event.inputs.DEVICE_PATH }}/BoardConfig.mk || echo "File not found"
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
       continue-on-error: true
 
-    - name: Set Swap Space
-      uses: pierotofy/set-swap-space@master
-      with:
-        swap-size-gb: 12
-
-    - name: Building recovery
+    - name: Building (All Targets)
       run: |
         source build/envsetup.sh
         export ALLOW_MISSING_DEPENDENCIES=true
-        lunch ${{ github.event.inputs.MAKEFILE_NAME }}-eng && mka ${{ github.event.inputs.BUILD_TARGET }}image
+        
+        echo "Starting lunch for ${{ github.event.inputs.MAKEFILE_NAME }}-eng..."
+        lunch ${{ github.event.inputs.MAKEFILE_NAME }}-eng
+        
+        echo "Starting Build..."
+        # 关键修改：同时编译 recovery, boot 和 vendorboot
+        # 如果设备没有recovery分区，recoveryimage可能会瞬间结束，但bootimage会继续编译
+        mka recoveryimage bootimage vendorbootimage
       working-directory: ${{ steps.pwd.outputs.workspace-folder }}
 
-    - name: Check Output Directory
+    - name: Debug Output Directory
       run: |
-        echo "------ 检查输出目录文件列表 ------"
-        # 递归列出 out/target/product 下的所有文件，方便排查生成了什么
-        ls -R workspace/out/target/product/
-        echo "----------------------------------"
+        echo "------ 查找所有 img 文件 ------"
+        find workspace/out/target/product -name "*.img"
+        echo "------ 查找所有 zip 文件 ------"
+        find workspace/out/target/product -name "*.zip"
+        echo "-----------------------------"
 
     - name: Upload to Release
       uses: softprops/action-gh-release@v2
@@ -169,12 +130,11 @@ jobs:
         files: | 
           workspace/out/target/product/**/*.img
           workspace/out/target/product/**/*.zip
-          workspace/out/target/product/**/*.cpio
         name: ${{ github.event.inputs.DEVICE_NAME }}-${{ github.run_id }}
         tag_name: ${{ github.run_id }}
         body: |
           Manifest: ${{ github.event.inputs.MANIFEST_BRANCH }}
           Device: ${{ github.event.inputs.DEVICE_NAME }}
-          Target: ${{ github.event.inputs.BUILD_TARGET }}
+          Build Targets: recoveryimage, bootimage, vendorbootimage
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
